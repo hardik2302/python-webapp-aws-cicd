@@ -1,0 +1,55 @@
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Checkout the repository
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # Step 2: Configure AWS credentials
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-2
+
+    # Step 3: Login to AWS ECR
+    - name: Log in to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    # Step 4: Build the Docker image
+    - name: Build Docker image
+      run: |
+        IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/docker-flask"
+        docker build -t $IMAGE_URI:${{ github.run_number }} .
+        echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+    # Step 5: Push Docker image to ECR
+    - name: Push Docker image to ECR
+      run: |
+        docker push $IMAGE_URI:${{ github.run_number }}
+
+    # Step 6: Deploy to EC2
+    - name: Deploy to EC2
+      run: |
+        INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=my_ec2_instance" --query "Reservations[].Instances[].InstanceId" --output text)
+        IMAGE_URI="${{ env.IMAGE_URI }}:${{ github.run_number }}"
+        aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name "AWS-RunShellScript" \
+          --comment "Deploying new image" \
+          --parameters commands="
+          docker pull $IMAGE_URI,
+          docker stop my-app || true,
+          docker rm my-app || true,
+          docker run -d --name docker-flask -p 5000:5000 $IMAGE_URI"
